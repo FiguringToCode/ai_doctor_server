@@ -4,12 +4,22 @@ const cors = require('cors')
 const OpenAI = require('openai')
 const jwt = require('jsonwebtoken')
 const axios = require('axios')
+const cookieParser = require('cookie-parser')
 
 
 require('dotenv').config()
-app.use(cors())
+
+// CORS Configuration
+app.use(cors({
+    origin: process.env.FRONTEND_URL,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Set-Cookie']
+}))
+
 app.use(express.json())
-app.use(require('cookie-parser')())
+app.use(cookieParser())
 
 
 // JWT Verification Middleware
