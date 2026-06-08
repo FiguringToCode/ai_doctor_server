@@ -2,14 +2,103 @@ const express = require('express')
 const app = express()
 const cors = require('cors')
 const OpenAI = require('openai')
+const jwt = require('jsonwebtoken')
+const axios = require('axios')
 
 
 require('dotenv').config()
 app.use(cors())
+app.use(express.json())
+app.use(require('cookie-parser')())
+
+
+// JWT Verification Middleware
+const verifyJWT = (req, res, next) => {
+    const token = req.cookies.jwt_token || req.headers.authorization?.split(' ')[1]
+
+    if(!token){
+        return res.status(401).json({error: "No Token Provided"})
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET)
+        req.user = decoded
+        next()
+    } catch (error) {
+        return res.status(401).json({error: 'Invalid or expired token'})
+    }
+}
+
+
+// Initiate Google OAuth
+app.get('/auth/google', (req, res) => {
+    const googleAuthUrl = `https://accounts.google.com/o/oauth2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${process.env.BACKEND_URL || `http://localhost:${PORT}`}/auth/google/callback&response_type=code&scope=profile email`
+
+    res.redirect(googleAuthUrl)
+})
+
+
+// Google OAUth Callback
+app.get('/auth/google/callback', async (req, res) => {
+    const { code } = req.query
+    if(!code){
+        return res.status(400).send("Authorization code not provided")
+    }
+
+    try {
+        // Exchange code for Access Token
+        const params = new URLSearchParams({
+            client_id: process.env.GOOGLE_CLIENT_ID,
+            client_secret: process.env.GOOGLE_CLIENT_SECRET,
+            code: req.query.code,
+            grant_type: "authorization_code",
+            redirect_uri: `${process.env.BACKEND_URL || `http://localhost:${PORT}`}/auth/google/callback`
+        })
+
+        const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', params.toString(), {
+          headers: { "Content-Type": "application/x-www-form-urlencoded" }  
+        })
+
+        const accessToken = tokenResponse.data.access_token
+
+        // Fetch User info from google
+        const userResponse = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        })
+
+        const { email, id: userId, name, picture } = userResponse.data
+
+        console.log('✅ User authenticated:', { email, userId, name })
+
+        // Issue JWT with user info
+        const jwtToken = jwt.sign({
+            email,
+            userId,
+            name,
+            picture
+        }, process.env.JWT_SECRET, {expiresIn: '1d'})
+
+        // Store JWT in httpOnly cookie
+        res.cookie("jwt_token", jwtToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "capricon",
+            sameSite: process.env.NODE_ENV === 'capricon' ? 'none' : 'lax',
+            maxAge: 1 * 24 * 60 * 60 * 1000, // 1 Day
+            path: '/'
+        })
+
+        // Redirect to frontend
+        return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/profile`)
+
+    } catch (error) {
+        console.error(error.response?.data || error.message)
+        res.status(400).send("OAuth exchange failed")
+    }
+})
 
 
 const API_KEY = process.env.OPENROUTER_API_KEY
-if(!API_KEY){
+if (!API_KEY) {
     console.error('Please set OPENROUTER API KEY in .env file')
     process.exit(1)
 }
@@ -21,7 +110,7 @@ const client = new OpenAI({
     apiKey: API_KEY
 })
 
-const MODEL = 'stepfun/step-3.5-flash:free'
+const MODEL = 'openrouter/owl-alpha'
 
 const SYSTEM_PROMPT = `
 You are an AI assistant acting as a helpful doctor consultant.
@@ -59,9 +148,31 @@ app.get('/health', (req, res) => {
     res.json({ ok: true })
 })
 
+// Protected Route - Get User Profile (requires JWT)
+app.get('/user/profile', verifyJWT, async (req, res) => {
+    try {
+        res.json({
+            user: {
+                email: req.user.email,
+                userId: req.user.userId,
+                name: req.user.name,
+                picture: req.user.picture
+            }
+        })
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch profile' })
+    }
+})
+
+// Logout endpoint
+app.post('/auth/logout', (req, res) => {
+    res.clearCookie('jwt_token')
+    res.json({ message: 'Logged out successfully' })
+})
+
 // GET /api/doctor-consult?symptoms=&age=&gender=
 // Defaults: "headache", 30, "unknown"
-app.get('/api/doctor-consult', async (req, res) => {
+app.get('/api/doctor-consult', verifyJWT, async (req, res) => {
     const symptoms = (req.query.symptoms || 'headache').toString()
     const age = Number(req.query.age || 30) || 30
     const gender = (req.query.gender || 'unknown').toString()
@@ -87,7 +198,7 @@ app.get('/api/doctor-consult', async (req, res) => {
         } catch (_) {
             return res.status(502).json({ error: 'Model did not return valid JSON', raw: content })
         }
-        
+
     } catch (error) {
         const message = error?.response?.data || error?.message || 'Unknown error'
         return res.status(500).json({ error: 'Upstream error', detail: message })
