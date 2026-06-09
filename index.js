@@ -175,7 +175,7 @@ app.get('/user/profile', verifyJWT, async (req, res) => {
 })
 
 // Logout endpoint
-app.post('/auth/logout', (req, res) => {
+app.get('/auth/logout', (req, res) => {
     res.clearCookie('jwt_token')
     res.json({ message: 'Logged out successfully' })
 })
